@@ -1,0 +1,565 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Three-Body Problem - RKF45 Accurate</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { 
+  background: #000; 
+  overflow: hidden; 
+  font-family: 'Consolas', 'Monaco', monospace;
+  color: #0f0;
+}
+#canvas { display: block; }
+#ui {
+  position: fixed;
+  top: 15px;
+  left: 15px;
+  background: rgba(0, 20, 0, 0.95);
+  padding: 15px;
+  border: 1px solid #0f0;
+  border-radius: 4px;
+  min-width: 280px;
+  box-shadow: 0 0 20px rgba(0, 255, 0, 0.3);
+}
+h1 {
+  font-size: 14px;
+  margin-bottom: 12px;
+  color: #0ff;
+  letter-spacing: 2px;
+}
+.section {
+  margin-bottom: 12px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid #003300;
+}
+.section:last-child { border: none; }
+label {
+  display: block;
+  font-size: 11px;
+  color: #0a0;
+  margin-bottom: 4px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+}
+select, input[type="range"] {
+  width: 100%;
+  background: #001100;
+  border: 1px solid #0a0;
+  color: #0f0;
+  padding: 6px;
+  font-size: 11px;
+  font-family: inherit;
+}
+input[type="range"] {
+  padding: 0;
+  height: 24px;
+}
+button {
+  width: 100%;
+  background: #001a00;
+  border: 1px solid #0f0;
+  color: #0f0;
+  padding: 8px;
+  cursor: pointer;
+  font-size: 11px;
+  font-family: inherit;
+  margin-top: 6px;
+  transition: all 0.2s;
+}
+button:hover {
+  background: #0f0;
+  color: #000;
+}
+.stats {
+  font-size: 10px;
+  line-height: 1.6;
+  color: #0a0;
+}
+.stats-value {
+  color: #0ff;
+  font-weight: bold;
+}
+.error { color: #f00; }
+.warning { color: #ff0; }
+.good { color: #0f0; }
+</style>
+</head>
+<body>
+<canvas id="canvas"></canvas>
+<div id="ui">
+  <h1>THREE-BODY RKF45</h1>
+  
+  <div class="section">
+    <label>Scenario</label>
+    <select id="preset">
+      <option value="figure8">Figure-8 (Stable)</option>
+      <option value="pythagorean">Pythagorean (Chaotic)</option>
+      <option value="solar">Star-Planet-Moon</option>
+      <option value="lagrange">Lagrange L4/L5</option>
+    </select>
+  </div>
+
+  <div class="section">
+    <label>Time Scale: <span id="speed-val">1.0</span>x</label>
+    <input type="range" id="speed" min="0.1" max="5" step="0.1" value="1">
+  </div>
+
+  <div class="section">
+    <label>Tolerance: <span id="tol-val">1e-9</span></label>
+    <input type="range" id="tolerance" min="-12" max="-6" step="0.5" value="-9">
+  </div>
+
+  <div class="section">
+    <button id="reset">RESET</button>
+    <button id="pause">PAUSE</button>
+  </div>
+
+  <div class="section stats" id="stats"></div>
+</div>
+
+<script type="module">
+// ============================================================
+// HIGH-PERFORMANCE RKF45 THREE-BODY SIMULATOR
+// ============================================================
+
+const G = 1.0; // Normalized gravitational constant
+
+class Vec2 {
+  constructor(x = 0, y = 0) {
+    this.x = x;
+    this.y = y;
+  }
+  add(v) { return new Vec2(this.x + v.x, this.y + v.y); }
+  sub(v) { return new Vec2(this.x - v.x, this.y - v.y); }
+  mul(s) { return new Vec2(this.x * s, this.y * s); }
+  mag() { return Math.sqrt(this.x * this.x + this.y * this.y); }
+  normalize() {
+    const m = this.mag();
+    return m > 0 ? this.mul(1/m) : new Vec2(0, 0);
+  }
+}
+
+class Body {
+  constructor(mass, x, y, vx, vy, color) {
+    this.mass = mass;
+    this.x = x;
+    this.y = y;
+    this.vx = vx;
+    this.vy = vy;
+    this.color = color;
+    this.trail = [];
+    this.maxTrail = 500;
+  }
+}
+
+class RKF45Integrator {
+  constructor(tolerance = 1e-9) {
+    this.tol = tolerance;
+    this.dtMin = 1e-6;
+    this.dtMax = 0.1;
+    
+    // Butcher tableau coefficients for RKF45
+    this.a = [0, 1/4, 3/8, 12/13, 1, 1/2];
+    this.b = [
+      [],
+      [1/4],
+      [3/32, 9/32],
+      [1932/2197, -7200/2197, 7296/2197],
+      [439/216, -8, 3680/513, -845/4104],
+      [-8/27, 2, -3544/2565, 1859/4104, -11/40]
+    ];
+    this.c4 = [25/216, 0, 1408/2565, 2197/4104, -1/5, 0];
+    this.c5 = [16/135, 0, 6656/12825, 28561/56430, -9/50, 2/55];
+  }
+
+  computeDerivatives(bodies, state) {
+    const n = bodies.length;
+    const deriv = new Float64Array(n * 4);
+    
+    for (let i = 0; i < n; i++) {
+      const idx = i * 4;
+      deriv[idx] = state[idx + 2];     // dx/dt = vx
+      deriv[idx + 1] = state[idx + 3]; // dy/dt = vy
+      
+      let ax = 0, ay = 0;
+      for (let j = 0; j < n; j++) {
+        if (i === j) continue;
+        
+        const jdx = j * 4;
+        const dx = state[jdx] - state[idx];
+        const dy = state[jdx + 1] - state[idx + 1];
+        const r2 = dx * dx + dy * dy;
+        const r = Math.sqrt(r2);
+        const r3 = r2 * r + 1e-10; // Softening
+        
+        const force = G * bodies[j].mass / r3;
+        ax += force * dx;
+        ay += force * dy;
+      }
+      
+      deriv[idx + 2] = ax;
+      deriv[idx + 3] = ay;
+    }
+    
+    return deriv;
+  }
+
+  step(bodies, state, dt) {
+    const n = state.length;
+    const k = Array(6);
+    const temp = new Float64Array(n);
+    
+    // k1
+    k[0] = this.computeDerivatives(bodies, state);
+    
+    // k2
+    for (let i = 0; i < n; i++) {
+      temp[i] = state[i] + dt * this.b[1][0] * k[0][i];
+    }
+    k[1] = this.computeDerivatives(bodies, temp);
+    
+    // k3
+    for (let i = 0; i < n; i++) {
+      temp[i] = state[i] + dt * (this.b[2][0] * k[0][i] + this.b[2][1] * k[1][i]);
+    }
+    k[2] = this.computeDerivatives(bodies, temp);
+    
+    // k4
+    for (let i = 0; i < n; i++) {
+      temp[i] = state[i] + dt * (this.b[3][0] * k[0][i] + this.b[3][1] * k[1][i] + this.b[3][2] * k[2][i]);
+    }
+    k[3] = this.computeDerivatives(bodies, temp);
+    
+    // k5
+    for (let i = 0; i < n; i++) {
+      temp[i] = state[i] + dt * (this.b[4][0] * k[0][i] + this.b[4][1] * k[1][i] + 
+                                  this.b[4][2] * k[2][i] + this.b[4][3] * k[3][i]);
+    }
+    k[4] = this.computeDerivatives(bodies, temp);
+    
+    // k6
+    for (let i = 0; i < n; i++) {
+      temp[i] = state[i] + dt * (this.b[5][0] * k[0][i] + this.b[5][1] * k[1][i] + 
+                                  this.b[5][2] * k[2][i] + this.b[5][3] * k[3][i] + 
+                                  this.b[5][4] * k[4][i]);
+    }
+    k[5] = this.computeDerivatives(bodies, temp);
+    
+    // 4th and 5th order solutions
+    const y4 = new Float64Array(n);
+    const y5 = new Float64Array(n);
+    
+    for (let i = 0; i < n; i++) {
+      y4[i] = state[i] + dt * (this.c4[0] * k[0][i] + this.c4[1] * k[1][i] + 
+                                this.c4[2] * k[2][i] + this.c4[3] * k[3][i] + 
+                                this.c4[4] * k[4][i] + this.c4[5] * k[5][i]);
+      
+      y5[i] = state[i] + dt * (this.c5[0] * k[0][i] + this.c5[1] * k[1][i] + 
+                                this.c5[2] * k[2][i] + this.c5[3] * k[3][i] + 
+                                this.c5[4] * k[4][i] + this.c5[5] * k[5][i]);
+    }
+    
+    // Error estimation
+    let maxError = 0;
+    for (let i = 0; i < n; i++) {
+      const err = Math.abs(y5[i] - y4[i]);
+      maxError = Math.max(maxError, err);
+    }
+    
+    return { y: y5, error: maxError };
+  }
+}
+
+class Simulation {
+  constructor() {
+    this.canvas = document.getElementById('canvas');
+    this.ctx = this.canvas.getContext('2d', { alpha: false });
+    
+    this.bodies = [];
+    this.integrator = new RKF45Integrator(1e-9);
+    this.time = 0;
+    this.dt = 0.001;
+    this.speed = 1.0;
+    this.paused = false;
+    
+    this.scale = 200;
+    this.centerX = 0;
+    this.centerY = 0;
+    
+    this.E0 = 0; // Initial energy
+    this.stepCount = 0;
+    this.acceptedSteps = 0;
+    this.rejectedSteps = 0;
+    
+    this.resize();
+    window.addEventListener('resize', () => this.resize());
+    
+    this.setupUI();
+    this.loadPreset('figure8');
+    this.loop();
+  }
+
+  resize() {
+    this.canvas.width = window.innerWidth;
+    this.canvas.height = window.innerHeight;
+    this.centerX = this.canvas.width / 2;
+    this.centerY = this.canvas.height / 2;
+  }
+
+  setupUI() {
+    const speedSlider = document.getElementById('speed');
+    const speedVal = document.getElementById('speed-val');
+    speedSlider.addEventListener('input', () => {
+      this.speed = parseFloat(speedSlider.value);
+      speedVal.textContent = this.speed.toFixed(1);
+    });
+
+    const tolSlider = document.getElementById('tolerance');
+    const tolVal = document.getElementById('tol-val');
+    tolSlider.addEventListener('input', () => {
+      const exp = parseFloat(tolSlider.value);
+      this.integrator.tol = Math.pow(10, exp);
+      tolVal.textContent = `1e${exp}`;
+    });
+
+    document.getElementById('preset').addEventListener('change', (e) => {
+      this.loadPreset(e.target.value);
+    });
+
+    document.getElementById('reset').addEventListener('click', () => {
+      const preset = document.getElementById('preset').value;
+      this.loadPreset(preset);
+    });
+
+    document.getElementById('pause').addEventListener('click', () => {
+      this.paused = !this.paused;
+      document.getElementById('pause').textContent = this.paused ? 'RESUME' : 'PAUSE';
+    });
+  }
+
+  loadPreset(name) {
+    this.bodies = [];
+    this.time = 0;
+    this.stepCount = 0;
+    this.acceptedSteps = 0;
+    this.rejectedSteps = 0;
+    this.dt = 0.001;
+    
+    if (name === 'figure8') {
+      // Chenciner-Montgomery figure-8 orbit
+      this.scale = 220;
+      this.bodies = [
+        new Body(1, -0.97000436, 0.24308753, 0.4662036850, 0.4323657300, '#ff3366'),
+        new Body(1, 0.97000436, -0.24308753, 0.4662036850, 0.4323657300, '#33ff66'),
+        new Body(1, 0, 0, -0.93240737, -0.86473146, '#3366ff')
+      ];
+    } else if (name === 'pythagorean') {
+      // Burrau's problem (3-4-5 triangle)
+      this.scale = 120;
+      this.bodies = [
+        new Body(3, 1, 3, 0, 0, '#ff9933'),
+        new Body(4, -2, -1, 0, 0, '#9933ff'),
+        new Body(5, 1, -1, 0, 0, '#33ccff')
+      ];
+    } else if (name === 'solar') {
+      // Star-planet-moon system
+      this.scale = 150;
+      this.bodies = [
+        new Body(10, 0, 0, 0, 0, '#ffdd44'),
+        new Body(1, 2, 0, 0, 2.2, '#4488ff'),
+        new Body(0.01, 2.3, 0, 0, 3.8, '#aaaaaa')
+      ];
+    } else if (name === 'lagrange') {
+      // Jupiter-like mass at L4 Lagrange point
+      this.scale = 180;
+      const angle = Math.PI / 3; // 60 degrees
+      this.bodies = [
+        new Body(10, 0, 0, 0, 0, '#ffaa00'),
+        new Body(1, 3, 0, 0, 1.8, '#0088ff'),
+        new Body(0.001, 3 * Math.cos(angle), 3 * Math.sin(angle), 
+                 -1.8 * Math.sin(angle), 1.8 * Math.cos(angle), '#ff0088')
+      ];
+    }
+    
+    this.E0 = this.computeEnergy();
+  }
+
+  getState() {
+    const state = new Float64Array(this.bodies.length * 4);
+    for (let i = 0; i < this.bodies.length; i++) {
+      const b = this.bodies[i];
+      const idx = i * 4;
+      state[idx] = b.x;
+      state[idx + 1] = b.y;
+      state[idx + 2] = b.vx;
+      state[idx + 3] = b.vy;
+    }
+    return state;
+  }
+
+  setState(state) {
+    for (let i = 0; i < this.bodies.length; i++) {
+      const b = this.bodies[i];
+      const idx = i * 4;
+      b.x = state[idx];
+      b.y = state[idx + 1];
+      b.vx = state[idx + 2];
+      b.vy = state[idx + 3];
+    }
+  }
+
+  computeEnergy() {
+    let KE = 0;
+    let PE = 0;
+    
+    for (let i = 0; i < this.bodies.length; i++) {
+      const b1 = this.bodies[i];
+      KE += 0.5 * b1.mass * (b1.vx * b1.vx + b1.vy * b1.vy);
+      
+      for (let j = i + 1; j < this.bodies.length; j++) {
+        const b2 = this.bodies[j];
+        const dx = b2.x - b1.x;
+        const dy = b2.y - b1.y;
+        const r = Math.sqrt(dx * dx + dy * dy);
+        PE -= G * b1.mass * b2.mass / r;
+      }
+    }
+    
+    return KE + PE;
+  }
+
+  integrate() {
+    const targetDt = this.dt * this.speed;
+    const state = this.getState();
+    const result = this.integrator.step(this.bodies, state, targetDt);
+    
+    this.stepCount++;
+    
+    // Adaptive timestep control
+    if (result.error < this.integrator.tol) {
+      this.setState(result.y);
+      this.time += targetDt;
+      this.acceptedSteps++;
+      
+      // Update trails
+      for (let b of this.bodies) {
+        if (b.trail.length === 0 || 
+            Math.hypot(b.x - b.trail[b.trail.length - 1].x, 
+                      b.y - b.trail[b.trail.length - 1].y) > 0.02) {
+          b.trail.push({ x: b.x, y: b.y });
+          if (b.trail.length > b.maxTrail) b.trail.shift();
+        }
+      }
+      
+      // Increase timestep if error very small
+      if (result.error < this.integrator.tol * 0.1) {
+        this.dt = Math.min(this.dt * 1.2, this.integrator.dtMax);
+      }
+    } else {
+      this.rejectedSteps++;
+      // Decrease timestep
+      this.dt = Math.max(this.dt * 0.5, this.integrator.dtMin);
+    }
+  }
+
+  draw() {
+    // Clear with trail fade
+    this.ctx.fillStyle = 'rgba(0, 0, 0, 0.15)';
+    this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
+    
+    // Draw trails
+    for (let b of this.bodies) {
+      if (b.trail.length < 2) continue;
+      
+      this.ctx.beginPath();
+      this.ctx.strokeStyle = b.color;
+      this.ctx.lineWidth = 1;
+      this.ctx.globalAlpha = 0.4;
+      
+      const p0 = b.trail[0];
+      this.ctx.moveTo(
+        this.centerX + p0.x * this.scale,
+        this.centerY - p0.y * this.scale
+      );
+      
+      for (let i = 1; i < b.trail.length; i++) {
+        const p = b.trail[i];
+        this.ctx.lineTo(
+          this.centerX + p.x * this.scale,
+          this.centerY - p.y * this.scale
+        );
+      }
+      this.ctx.stroke();
+      this.ctx.globalAlpha = 1;
+    }
+    
+    // Draw bodies
+    for (let b of this.bodies) {
+      const x = this.centerX + b.x * this.scale;
+      const y = this.centerY - b.y * this.scale;
+      const r = Math.max(4, Math.sqrt(b.mass) * 6);
+      
+      // Glow
+      const grad = this.ctx.createRadialGradient(x, y, 0, x, y, r * 2);
+      grad.addColorStop(0, b.color);
+      grad.addColorStop(0.5, b.color + '88');
+      grad.addColorStop(1, 'transparent');
+      
+      this.ctx.fillStyle = grad;
+      this.ctx.beginPath();
+      this.ctx.arc(x, y, r * 2, 0, Math.PI * 2);
+      this.ctx.fill();
+      
+      // Core
+      this.ctx.fillStyle = b.color;
+      this.ctx.beginPath();
+      this.ctx.arc(x, y, r, 0, Math.PI * 2);
+      this.ctx.fill();
+    }
+  }
+
+  updateStats() {
+    const E = this.computeEnergy();
+    const dE = Math.abs((E - this.E0) / this.E0) * 100;
+    const acceptance = this.stepCount > 0 ? 
+      (this.acceptedSteps / this.stepCount * 100).toFixed(1) : 0;
+    
+    let statusClass = 'good';
+    if (dE > 0.1) statusClass = 'warning';
+    if (dE > 1) statusClass = 'error';
+    
+    document.getElementById('stats').innerHTML = `
+      Time: <span class="stats-value">${this.time.toFixed(3)}</span><br>
+      Energy: <span class="stats-value ${statusClass}">${E.toFixed(6)}</span><br>
+      ΔE/E₀: <span class="stats-value ${statusClass}">${dE.toExponential(2)}%</span><br>
+      dt: <span class="stats-value">${this.dt.toExponential(2)}</span><br>
+      Accept: <span class="stats-value">${acceptance}%</span><br>
+      Steps: <span class="stats-value">${this.stepCount}</span>
+    `;
+  }
+
+  loop() {
+    if (!this.paused) {
+      // Multiple substeps for performance
+      for (let i = 0; i < 3; i++) {
+        this.integrate();
+      }
+    }
+    
+    this.draw();
+    
+    if (this.stepCount % 10 === 0) {
+      this.updateStats();
+    }
+    
+    requestAnimationFrame(() => this.loop());
+  }
+}
+
+new Simulation();
+</script>
+</body>
+</html>
