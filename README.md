@@ -4,7 +4,7 @@ A browser-based three-body gravitational simulator that visualizes how simple Ne
 
 This project uses an **adaptive Runge–Kutta–Fehlberg (RKF45) integrator** to solve the classical three-body problem in **normalized astronomical units**, with real-time rendering and numerical diagnostics.
 
-![Simulation Screenshot](./images/simulation.png)
+![Simulation Screenshot](./image.png)
 
 ---
 
